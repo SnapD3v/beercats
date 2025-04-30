@@ -40,15 +40,19 @@ def send_command(command, delay=1):
 def set_speed(left_speed, right_speed):
     send_command(b'\xff\x02\x01' + bytes([left_speed]) + b'\xff', delay=0.5)
     send_command(b'\xff\x02\x02' + bytes([right_speed]) + b'\xff', delay=0.5)
+    time.sleep(2)
 
 def move_forward(duration=1):
     send_command(b'\xff\x00\x01\x00\xff', delay=duration)
     send_command(b'\xff\x00\x00\x00\xff', delay=0.5)  # Остановка
+    time.sleep(2)
 
 def turn_left(duration=1):
     send_command(b'\xff\x00\x04\x00\xff', delay=duration)
     send_command(b'\xff\x00\x00\x00\xff', delay=0.5)
+    time.sleep(2)
 
 def turn_right(duration=1):
     send_command(b'\xff\x00\x03\x00\xff', delay=duration)
     send_command(b'\xff\x00\x00\x00\xff', delay=0.5)
+    time.sleep(2)

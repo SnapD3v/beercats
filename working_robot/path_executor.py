@@ -7,9 +7,9 @@ logger = logging.getLogger("PATH")
 
 
 class PathExecutor:
-    def __init__(self, path):
+    def __init__(self, path, angle):
         self.path = path
-        self.current_angle = 0
+        self.current_angle = angle
         logger.info(f"🛣️ Initialized with path: {path}")
 
     def _calculate_angle(self, current, next_point):
@@ -24,7 +24,7 @@ class PathExecutor:
     def execute_path(self):
         logger.info("🏁 Starting path execution")
         try:
-            for i in range(len(self.path) - 1):
+            for i in range(1):
                 current = self.path[i]
                 next_point = self.path[i + 1]
                 logger.debug(f"📍 Step {i + 1}: {current} → {next_point}")
@@ -37,16 +37,16 @@ class PathExecutor:
                     print(angle_diff * 0.01)
                     if angle_diff > 0:
                         logger.info(f"🔄 Turning RIGHT by {angle_diff:.1f}°")
-                        turn_right(duration=angle_diff * 0.01)
+                        turn_right(duration=angle_diff * 0.01 * 1.25)
                     else:
                         logger.info(f"🔄 Turning LEFT by {abs(angle_diff):.1f}°")
-                        turn_left(duration=abs(angle_diff) * 0.01)
+                        turn_left(duration=abs(angle_diff) * 0.01 * 1.35)
                     self.current_angle += angle_diff
 
                 # Движение
                 distance = math.hypot(next_point[0] - current[0], next_point[1] - current[1])
                 logger.info(f"🚗 Moving forward {distance:.2f} units")
-                move_forward(duration=distance * 0.17)  # Минимум 0.5 сек
+                move_forward(duration=distance * 0.37)  # Минимум 0.5 сек
 
         except Exception as e:
             logger.error(f"💥 Execution failed: {str(e)}")
