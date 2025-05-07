@@ -39,7 +39,7 @@ tprint("Hello   world")
 print(RESET)
 
 print(RED, end="")
-tprint("DIR   I   Love   You")
+tprint("   I   Love   You")
 print(RESET)
 
 # Моделька
@@ -315,11 +315,6 @@ while True:
         #    new_angles = new_angles[1:]
 
         if not new_angles:
-            print("\033[32m", end="")
-            tprint("My creators")
-            tprint("Ilya")
-            tprint("Roma")
-            tprint("Dima")
             print(RESET)
             break
 
