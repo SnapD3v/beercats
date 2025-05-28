@@ -179,51 +179,84 @@ class RobotController:
         self.send_command(STOP_COMMAND)
 
     def execute_movement(self, current_vector, next_direction):
+        """
+    Выполняет движение робота из текущего направления в следующее.
+
+    Параметры:
+        current_vector: текущее направление робота (-2: влево, -1: вверх, 0: вправо, 1: вниз)
+        next_direction: следующее целевое направление
+
+    Возвращает:
+        Новое текущее направление после выполнения движения
+    """
+
+        # 1. Проверка на разворот на 180 градусов
         if abs(next_direction - current_vector) == 2:
             print(
                 f"180° turn from {self.direction_name(current_vector)} to {self.direction_name(next_direction)}")
+
+            # Случай 1: Разворот через два поворота направо
             if (next_direction == 1 and current_vector == -1) or (next_direction == 0 and current_vector == -2):
-                self.do(TIME_TO_90, TURN_RIGHT)
-                time.sleep(0.5)
-                self.do(TIME_TO_90, TURN_RIGHT)
-                return (current_vector + 2) % 4
+                self.do(TIME_TO_90, TURN_RIGHT)  # Первый поворот направо
+                time.sleep(0.5)  # Пауза между поворотами
+                self.do(TIME_TO_90, TURN_RIGHT)  # Второй поворот направо
+                return (current_vector + 2) % 4  # Обновляем направление
+
+            # Случай 2: Разворот через два поворота налево
             elif (next_direction == -1 and current_vector == 1) or (next_direction == -2 and current_vector == 0):
-                self.do(TIME_TO_90, TURN_LEFT)
-                time.sleep(0.5)
-                self.do(TIME_TO_90, TURN_LEFT)
-                return (current_vector - 2) % 4
+                self.do(TIME_TO_90, TURN_LEFT)  # Первый поворот налево
+                time.sleep(0.5)  # Пауза между поворотами
+                self.do(TIME_TO_90, TURN_LEFT)  # Второй поворот налево
+                return (current_vector - 2) % 4  # Обновляем направление
+
+        # 2. Специальные случаи для переходов через ноль (270° повороты)
+
+        # Случай 3: Из "влево" (-2) в "вниз" (1) - поворот налево на 270°
         elif next_direction == 1 and current_vector == -2:
+            # Сначала небольшой движение вперед
             self.do(TIME_TO_1STEP_FORWARD, GO_FORWARD)
             time.sleep(0.5)
+            # Поворот налево с коррекцией угла (DELTA_ANGLE)
             self.do(TIME_TO_90 + DELTA_ANGLE, TURN_LEFT)
             print("Turn LEFT")
-            return (current_vector + 3) % 4
+            return (current_vector + 3) % 4  # Обновляем направление
+
+        # Случай 4: Из "вниз" (1) в "влево" (-2) - поворот направо на 270°
         elif next_direction == -2 and current_vector == 1:
+            # Сначала небольшой движение вперед
             self.do(TIME_TO_1STEP_FORWARD, GO_FORWARD)
             time.sleep(0.5)
-            self.do(TIME_TO_90, TURN_RIGHT)
+            self.do(TIME_TO_90, TURN_RIGHT)  # Поворот направо
             print("Turn RIGHT")
-            return (current_vector - 3) % 4
+            return (current_vector - 3) % 4  # Обновляем направление
+
+        # 3. Стандартные повороты на 90 градусов
+
+        # Случай 5: Поворот направо (next_direction > current_vector)
         elif next_direction > current_vector:
+            # Сначала небольшой движение вперед
             self.do(TIME_TO_1STEP_FORWARD, GO_FORWARD)
             time.sleep(0.5)
-            self.do(TIME_TO_90, TURN_RIGHT)
+            self.do(TIME_TO_90, TURN_RIGHT)  # Поворот направо
             print("Turn RIGHT")
-            return (current_vector + 1) % 4
+            return (current_vector + 1) % 4  # Обновляем направление
+
+        # Случай 6: Поворот налево (next_direction < current_vector)
         elif next_direction < current_vector:
+            # Сначала небольшой движение вперед
             self.do(TIME_TO_1STEP_FORWARD, GO_FORWARD)
             time.sleep(0.5)
+            # Поворот налево с коррекцией угла (DELTA_ANGLE)
             self.do(TIME_TO_90 + DELTA_ANGLE, TURN_LEFT)
             print("Turn LEFT")
-            return (current_vector - 1) % 4
+            return (current_vector - 1) % 4  # Обновляем направление
+
+        # 4. Движение прямо (направления совпадают)
         else:
+            # Просто двигаемся вперед
             self.do(TIME_TO_1STEP_FORWARD, GO_FORWARD)
             print("FORWARD")
-            return current_vector
-
-    def direction_name(self, vector):
-        directions = {0: "RIGHT", 1: "DOWN", -1: "UP", -2: "LEFT"}
-        return directions.get(vector, "UNKNOWN")
+            return current_vector  # Направление не меняется
 
 
 class MovementCorrector:

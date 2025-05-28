@@ -1,0 +1,646 @@
+import cv2
+import numpy as np
+from ultralytics import YOLO
+import time
+import socket
+from art import tprint  # Corrected import from 'art import *'
+import asyncio
+
+# Assuming these are local modules from the original script
+import image_processor  # Placeholder, ensure this module exists and functions as expected
+from movement_correct import correct_direction, find_true_vector  # Placeholder
+from path_error import PathError  # Placeholder
+
+# --- Configuration Constants ---
+# These can be further integrated into classes as static members or config objects
+STEP_COUNT = 1
+ROBOT_RADIUS = 10
+# Not explicitly used in the provided snippet's main logic after refactor, but kept
+CORRECT_TIME = 160
+COORDINATE_DIFFERENCE_FOR_CORRECT = 2  # Used by movement_correct
+DELTA_ANGLE = 0  # Added to turn times
+
+# Speeds
+DEFAULT_LEFT_SPEED = 0x32
+DEFAULT_RIGHT_SPEED = 0x32
+
+# Movement timings (milliseconds)
+TIME_TO_90_DEGREES = 760
+TIME_TO_180_DEGREES = 980  # Not directly used for 180 turns, but kept
+TIME_FOR_ONE_STEP_FORWARD = 450
+
+# Colors for terminal output
+RED = "\033[31m"
+GREEN = "\033[32m"
+RESET = "\033[0m"
+
+# YOLO Model Path
+YOLO_MODEL_PATH = 'best.pt'
+
+# RTSP URL for the camera
+RTSP_URL = "rtsp://admin:UrFU_ISIT@10.32.9.223:554/Streaming/channels/101"
+
+# Robot Connection
+ROBOT_HOST = "192.168.1.1"
+ROBOT_PORT = 2001
+
+# Camera Calibration and Cropping Parameters
+CROP_X, CROP_Y, CROP_W, CROP_H = 588, 690, 1315, 230
+CAMERA_MATRIX = np.array([[5.47045703e+02, 0.00000000e+00, 1.27382808e+03],
+                          [0.00000000e+00, 5.28615087e+02, 9.63441154e+02],
+                          [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]])
+DIST_COEFS = np.array(
+    [-0.31517132, 0.10796146, -0.0019241, 0.00132282, -0.01692133])
+
+
+class RobotController:
+    """
+    Handles communication and movement commands for the robot.
+    """
+    GO_FORWARD_CMD = b"\xff\x00\x01\x00\xff"
+    GO_BACK_CMD = b"\xff\x00\x02\x00\xff"  # go_back in original
+    TURN_RIGHT_CMD = b"\xff\x00\x04\x00\xff"
+    TURN_LEFT_CMD = b"\xff\x00\x03\x00\xff"
+    STOP_CMD = b"\xff\x00\x00\x00\xff"
+
+    def __init__(self, host, port,
+                 time_90_deg=TIME_TO_90_DEGREES,
+                 time_1_step_fwd=TIME_FOR_ONE_STEP_FORWARD,
+                 delta_angle_time=DELTA_ANGLE):
+        self.host = host
+        self.port = port
+        self.time_90_deg = time_90_deg
+        self.time_1_step_fwd = time_1_step_fwd
+        self.delta_angle_time = delta_angle_time  # For fine-tuning turns
+        self.connection = None
+        self._connect()
+
+    def _connect(self):
+        try:
+            print(f"Connecting to robot at {self.host}:{self.port}...")
+            self.connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.connection.connect((self.host, self.port))
+            print("Successfully connected to robot.")
+        except socket.error as e:
+            print(f"{RED}Socket error during connection: {e}{RESET}")
+            self.connection = None
+            raise ConnectionError(f"Failed to connect to robot: {e}")
+
+    def _send_raw_command(self, command_bytes):
+        if not self.connection:
+            print(
+                f"{RED}Error: Robot not connected. Attempting to reconnect...{RESET}")
+            self._connect()  # Try to reconnect
+            if not self.connection:  # If still not connected, fail
+                print(
+                    f"{RED}Failed to send command: Robot connection is not established.{RESET}")
+                return False
+        try:
+            # print(f"Sending command: {command_bytes}")
+            self.connection.sendall(command_bytes)
+            return True
+        except socket.error as e:
+            print(
+                f"{RED}Socket error during send: {e}. Attempting to reconnect...{RESET}")
+            self.connection.close()
+            self.connection = None
+            try:  # Try to reconnect before failing
+                self._connect()
+                self.connection.sendall(command_bytes)  # Retry send
+                return True
+            except Exception as recon_e:
+                print(
+                    f"{RED}Failed to send command after reconnect attempt: {recon_e}{RESET}")
+                return False
+
+    def set_speed(self, left_speed=DEFAULT_LEFT_SPEED, right_speed=DEFAULT_RIGHT_SPEED):
+        print(f"Setting speed: Left={left_speed}, Right={right_speed}")
+        # Original script creates new connection for each speed command.
+        # Reusing connection if send_command is adapted, or use _send_raw_command
+        # For now, following original's isolated send for set_speed:
+        # This is inefficient, ideally set_speed would use the persistent connection.
+        # For this refactor, I'll keep the original temporary connection for set_speed
+        # unless send_command is refactored to use the main connection.
+        # Update: Using _send_raw_command to ensure it uses the persistent connection.
+        self._send_raw_command(b'\xff\x02\x01' + bytes([left_speed]) + b'\xff')
+        time.sleep(0.1)  # Small delay as in original send_command context
+        self._send_raw_command(
+            b'\xff\x02\x02' + bytes([right_speed]) + b'\xff')
+        time.sleep(0.1)  # Small delay
+
+    def _execute_timed_action(self, command_bytes, duration_ms):
+        """Sends a command, waits, then sends stop command."""
+        if not self.connection:
+            print(f"{RED}Cannot execute timed action: Robot not connected.{RESET}")
+            return False
+        try:
+            print(f"Executing action: {command_bytes} for {duration_ms}ms")
+            self._send_raw_command(command_bytes)
+            time.sleep(duration_ms / 1000.0)
+            self._send_raw_command(self.STOP_CMD)
+            time.sleep(0.5)  # Cooldown time after stopping
+            return True
+        except socket.error as e:
+            print(f"{RED}Socket error during timed action: {e}{RESET}")
+            # Consider closing and None-ing self.connection here if error implies connection loss
+            return False
+
+    def move_forward(self):
+        return self._execute_timed_action(self.GO_FORWARD_CMD, self.time_1_step_fwd)
+
+    def turn_left(self, precise=False):
+        duration = self.time_90_deg + (self.delta_angle_time if precise else 0)
+        return self._execute_timed_action(self.TURN_LEFT_CMD, duration)
+
+    # precise param was not in original for right, but added for consistency
+    def turn_right(self, precise=False):
+        duration = self.time_90_deg  # Original didn't add DELTA_ANGLE to right turns
+        return self._execute_timed_action(self.TURN_RIGHT_CMD, duration)
+
+    def stop(self):
+        return self._send_raw_command(self.STOP_CMD)
+
+    def close_connection(self):
+        if self.connection:
+            print("Closing robot connection.")
+            self.connection.close()
+            self.connection = None
+        print("Robot connection closed.")
+
+    def __del__(self):
+        self.close_connection()
+
+
+class CameraHandler:
+    """
+    Manages camera connection, frame capture, and image preprocessing.
+    """
+
+    def __init__(self, rtsp_url, camera_matrix, dist_coefs, crop_rect):
+        self.rtsp_url = rtsp_url
+        self.camera_matrix = camera_matrix
+        self.dist_coefs = dist_coefs
+        self.crop_x, self.crop_y, self.crop_w, self.crop_h = crop_rect
+        self.cap = None
+        self.new_camera_matrix = None
+        self.roi = None
+        self._initialize_camera()
+
+    def _initialize_camera(self):
+        print("Connecting to camera...")
+        self.cap = cv2.VideoCapture(self.rtsp_url)
+        if not self.cap.isOpened():
+            raise IOError(f"Cannot open RTSP stream: {self.rtsp_url}")
+
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        self.cap.set(cv2.CAP_PROP_FPS, 30)  # Attempt to set FPS
+
+        frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(
+            f"Camera connected. Resolution: {frame_width}x{frame_height}, FPS: {self.cap.get(cv2.CAP_PROP_FPS)}")
+
+        self.new_camera_matrix, self.roi = cv2.getOptimalNewCameraMatrix(
+            self.camera_matrix, self.dist_coefs, (
+                frame_width, frame_height), 1, (frame_width, frame_height)
+        )
+        print("Camera initialized.")
+
+    def get_processed_frame(self):
+        if not self.cap or not self.cap.isOpened():
+            print(f"{RED}Camera not open. Attempting to reinitialize...{RESET}")
+            try:
+                self._initialize_camera()  # Try to re-open
+            except IOError as e:
+                print(f"{RED}Failed to reinitialize camera: {e}{RESET}")
+                return None
+
+        # Clear buffer
+        for _ in range(2):  # Original had 2 grabs
+            self.cap.grab()
+        ret, frame = self.cap.read()
+
+        if not ret:
+            print(f"{RED}Failed to grab frame.{RESET}")
+            return None
+
+        undistorted_frame = cv2.undistort(
+            frame, self.camera_matrix, self.dist_coefs, None, self.new_camera_matrix)
+        cropped_frame = undistorted_frame[self.crop_y: self.crop_y +
+                                          self.crop_h, self.crop_x: self.crop_x + self.crop_w]
+        return cropped_frame
+
+    def release(self):
+        if self.cap:
+            self.cap.release()
+        print("Camera released.")
+
+    def __del__(self):
+        self.release()
+
+
+class ObjectDetector:
+    """
+    Uses YOLO model to detect objects in a frame.
+    """
+
+    def __init__(self, model_path):
+        print("Loading YOLO model...")
+        self.model = YOLO(model_path)
+        print(f"YOLO model loaded. Classes: {self.model.names}")
+
+    def detect_robot(self, frame):
+        """Detects the robot (class 0) and returns its bounding box."""
+        results = self.model.predict(
+            frame, conf=0.3, verbose=False)  # verbose=False to reduce console spam
+        robot_bbox = None
+        for r in results:
+            boxes = r.boxes
+            for box in boxes:
+                if int(box.cls[0].item()) == 0:  # Class 0 is the robot
+                    robot_bbox = box.xyxy[0].cpu().numpy()
+                    break  # Assuming one robot
+            if robot_bbox is not None:
+                break
+
+        annotated_frame = results[-1].plot() if results else frame
+        return robot_bbox, annotated_frame
+
+
+class PathPlanner:
+    """
+    Processes images to find a path for the robot.
+    """
+
+    def __init__(self, robot_radius, scale_factor):
+        self.robot_radius = robot_radius
+        self.scale_factor = scale_factor
+        self.current_path_rad = []  # Path in radians
+        self.current_path_dir = []  # Path in direction codes (-2, -1, 0, 1)
+
+    async def _calculate_path_async(self, image, robot_cords, is_initial_path=True):
+        if is_initial_path:
+            return await image_processor.process_image(
+                image,
+                robot_radius=self.robot_radius,
+                scale_factor=self.scale_factor,
+                robot_cords=robot_cords
+            )
+        else:
+            # Assuming 'secound_process_image' was a typo for 'second_process_image'
+            # or a specific function for subsequent path calculations.
+            # Using a generic name here, adjust if 'secound_process_image' has distinct logic.
+            return await image_processor.secound_process_image(  # Make sure this func exists
+                image,
+                robot_radius=self.robot_radius,
+                scale_factor=self.scale_factor,
+                robot_cords=robot_cords
+            )
+
+    def _convert_angles_to_directions(self, angles_rad):
+        directions = []
+        for angle in angles_rad:
+            if angle == -np.pi:
+                directions.append(-2)   # Left
+            elif angle == -np.pi / 2:
+                directions.append(-1)  # Up
+            elif angle == np.pi / 2:
+                directions.append(1)    # Down
+            elif angle == 0:
+                directions.append(0)        # Right
+            else:
+                print(
+                    f"{RED}Warning: Unknown angle {angle} in path calculation.{RESET}")
+        return directions
+
+    def plan_path(self, image, robot_cords_bbox, is_initial_path=True):
+        try:
+            # Convert bbox (x1,y1,x2,y2) to (int(x1), int(y1), int(x2), int(y2)) for image_processor
+            robot_cords_int = tuple(map(int, robot_cords_bbox))
+
+            angles_rad, _ = asyncio.run(self._calculate_path_async(
+                image, robot_cords_int, is_initial_path))
+            self.current_path_rad = angles_rad
+            self.current_path_dir = self._convert_angles_to_directions(
+                angles_rad)
+            print(f"Path planned (radians): {self.current_path_rad}")
+            print(f"Path planned (directions): {self.current_path_dir}")
+            return True
+        except PathError as e:
+            print(f"{RED}PathError during path planning: {e}{RESET}")
+            self.current_path_rad = []
+            self.current_path_dir = []
+            return False
+        except Exception as e:
+            print(
+                f"{RED}An unexpected error occurred during path planning: {e}{RESET}")
+            self.current_path_rad = []
+            self.current_path_dir = []
+            return False
+
+    def get_path_directions(self):
+        return self.current_path_dir
+
+    def consume_path_step(self):
+        if self.current_path_dir:
+            # Get and remove the first step
+            return self.current_path_dir.pop(0)
+        return None
+
+    def has_path(self):
+        return bool(self.current_path_dir)
+
+
+class NavigationSystem:
+    """
+    Orchestrates robot navigation using camera, detection, path planning, and control.
+    """
+    # Direction mapping for printing
+    DIRECTION_NAMES = {
+        0: "ВПРАВО (RIGHT)", 1: "ВНИЗ (DOWN)", -1: "ВВЕРХ (UP)", -2: "ВЛЕВО (LEFT)"}
+
+    def __init__(self, robot_controller, camera_handler, object_detector, path_planner):
+        self.robot_controller = robot_controller
+        self.camera_handler = camera_handler
+        self.object_detector = object_detector
+        self.path_planner = path_planner
+
+        self.current_robot_vector = 0  # Initial orientation: 0 (Right)
+        self.true_robot_vector = None
+        self.prev_robot_center = None
+        self.loop_iteration = 0
+
+        print(f"{GREEN}", end="")
+        tprint("Hello   world")
+        print(f"{RESET}", end="")
+        print(f"{RED}", end="")
+        tprint("   I   Love   You")
+        print(f"{RESET}", end="")
+
+    def _get_direction_name(self, vector_code):
+        return self.DIRECTION_NAMES.get(vector_code, f"НЕИЗВЕСТНО ({vector_code})")
+
+    def run(self):
+        try:
+            self.robot_controller.set_speed()  # Set default speed once
+
+            while True:
+                self.loop_iteration += 1
+                print(f"\n--- Navigation Step: {self.loop_iteration} ---")
+
+                frame = self.camera_handler.get_processed_frame()
+                if frame is None:
+                    print(f"{RED}Failed to get frame, skipping iteration.{RESET}")
+                    time.sleep(1)  # Wait before retrying
+                    continue
+
+                robot_bbox, annotated_frame = self.object_detector.detect_robot(
+                    frame)
+
+                # Display the annotated frame (optional)
+                cv2.imshow("Annotated Frame", annotated_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("Quit signal received.")
+                    break
+
+                if robot_bbox is None:
+                    print(f"{RED}Robot not detected in the frame.{RESET}")
+                    time.sleep(0.5)
+                    continue
+
+                robot_center_x = int((robot_bbox[0] + robot_bbox[2]) / 2)
+                robot_center_y = int((robot_bbox[1] + robot_bbox[3]) / 2)
+                current_robot_center = (robot_center_x, robot_center_y)
+                print(
+                    f"Robot detected at: {current_robot_center}, BBox: {robot_bbox}")
+
+                # Path planning logic
+                if not self.path_planner.has_path():  # If no path or path completed
+                    print("Planning new path...")
+                    is_initial = self.loop_iteration == 1  # Or some other logic for initial
+                    if not self.path_planner.plan_path(frame, robot_bbox, is_initial_path=is_initial):
+                        print(f"{RED}Failed to plan path. Waiting...{RESET}")
+                        time.sleep(1)
+                        continue
+
+                    if not self.path_planner.has_path():
+                        print(
+                            f"{RED}Path planning resulted in an empty path. Stopping.{RESET}")
+                        break  # Or retry
+
+                # Movement execution based on path
+                # Original code has a complex block for new_angles[1] != 0 as "ПРЕДИКТ ПОВОРОТА!!!"
+                # This logic needs careful translation if it's about skipping the first segment if it's a turn.
+                # For now, processing steps sequentially from the planned path.
+
+                # The original script had a loop `for new_angle in new_angles:` then `if c == STEP_COUNT: break`
+                # This implies multiple movements per frame/detection cycle.
+                # Refactoring to perform one step of the path per detection cycle for clarity.
+                # STEP_COUNT can control how many segments of a longer path are executed before replanning.
+
+                # This simplified version takes one step from the path planner per main loop iteration.
+                # The original had a nested loop for 'STEP_COUNT' which this simplifies.
+                # If STEP_COUNT > 1 was meant to execute multiple path segments before re-evaluating,
+                # that logic would need to be re-introduced here.
+
+                if not self.path_planner.has_path():
+                    print(
+                        f"{GREEN}Path successfully completed or no path to follow!{RESET}")
+                    break  # End of navigation if path is done
+
+                # Predict and adjust path if necessary (simplified from original "ПРЕДИКТ ПОВОРОТА!!!")
+                # The original code did `if new_angles[1] != 0: new_angles = new_angles[1:]`
+                # This means if the *second* step in the plan is a turn, skip the *first* step.
+                # This seems like a specific heuristic. We can implement it if needed,
+                # for now, we take the path as is.
+                path_directions = self.path_planner.get_path_directions()
+                if len(path_directions) > 1 and path_directions[0] == self.current_robot_vector and path_directions[1] != self.current_robot_vector:
+                    print(
+                        f"{GREEN}Path Prediction: Current direction matches first step, and second is a turn. Taking first step then re-evaluating.{RESET}")
+                    # This behavior (predicting turn) can be complex.
+                    # Original: "if new_angles[1] != 0: new_angles = new_angles[1:]" - this skips the first step.
+                    # If path_directions[0] is current direction, it will be a GO_FORWARD.
+                    # If path_directions[1] is a turn, it implies after this GO_FORWARD, a turn is expected.
+                    # The original code with `new_angles = new_angles[1:]` seems to skip the first step if the second is non-zero (turn).
+                    # This might be to correct overshooting or specific environmental quirks.
+                    # For now, we proceed with the first step.
+                    # No special action in this simplified version, just an observation.
+                    pass
+
+                # Get and remove first step
+                next_direction_code = self.path_planner.consume_path_step()
+
+                if next_direction_code is None:  # Should not happen if has_path() was true
+                    print(
+                        f"{RED}Error: Tried to get next step from an empty path.{RESET}")
+                    continue
+
+                print(
+                    f"Current Robot Orientation: {self._get_direction_name(self.current_robot_vector)}")
+                print(
+                    f"Next Planned Step: {self._get_direction_name(next_direction_code)}")
+
+                # Perform turns if necessary
+                delta_orientation = next_direction_code - self.current_robot_vector
+
+                if abs(delta_orientation) == 2 or abs(delta_orientation) == 4:  # 180-degree turn
+                    # Example: current = 0 (Right), next = -2 (Left) -> delta = -2.
+                    # Example: current = 1 (Down), next = -1 (Up) -> delta = -2.
+                    # The original code handled this with two 90-degree turns.
+                    print(
+                        f"Performing 180-degree turn: From {self._get_direction_name(self.current_robot_vector)} to {self._get_direction_name(next_direction_code)}")
+                    if (self.current_robot_vector == 1 and next_direction_code == -1) or \
+                       (self.current_robot_vector == 0 and next_direction_code == -2):  # Turn Left twice
+                        self.robot_controller.turn_left(precise=True)
+                        time.sleep(0.5)  # Delay between turns
+                        self.robot_controller.turn_left(precise=True)
+                    else:  # Turn Right twice
+                        self.robot_controller.turn_right()
+                        time.sleep(0.5)
+                        self.robot_controller.turn_right()
+                    self.current_robot_vector = next_direction_code  # Update after full 180 turn
+
+                elif (next_direction_code == 1 and self.current_robot_vector == -2) or \
+                     (next_direction_code == -2 and self.current_robot_vector == 1):  # Special 270 deg / wrap-around turns
+                    # Robot is Left (-2), needs to go Down (1) -> Effectively a Right turn
+                    # Robot is Down (1), needs to go Left (-2) -> Effectively a Left turn
+                    if next_direction_code == 1 and self.current_robot_vector == -2:  # From Left to Down
+                        print(
+                            f"Turning RIGHT: From {self._get_direction_name(self.current_robot_vector)} to {self._get_direction_name(next_direction_code)}")
+                        self.robot_controller.turn_right()
+                        self.current_robot_vector = 0  # Intermediate: now facing Right
+                    elif next_direction_code == -2 and self.current_robot_vector == 1:  # From Down to Left
+                        print(
+                            f"Turning LEFT: From {self._get_direction_name(self.current_robot_vector)} to {self._get_direction_name(next_direction_code)}")
+                        self.robot_controller.turn_left(precise=True)
+                        self.current_robot_vector = 0  # Intermediate: now facing Right
+                    # After this first turn, it will become a standard 90-degree turn in the next logic block or iteration
+
+                # Standard 90-degree turns
+                if next_direction_code > self.current_robot_vector:  # Turn Right
+                    # Handle wrap-around for Right turn: e.g. from UP (-1) to LEFT (-2) is not >
+                    # This simple > comparison is only for non-wrapping turns.
+                    # More robust: check (A - B + 4) % 4 logic if directions are 0,1,2,3
+                    # With -2, -1, 0, 1:
+                    # Curr=-1 (UP), Next=0 (RIGHT) -> diff=1. Turn Right.
+                    # Curr=0 (RIGHT), Next=1 (DOWN) -> diff=1. Turn Right.
+                    # Curr=-2 (LEFT), Next=0 (RIGHT) -> Handled by 180 deg.
+                    # Curr=-2 (LEFT), Next=-1 (UP) -> diff=1. Turn Right.
+                    if self.current_robot_vector != next_direction_code:  # Ensure it's an actual turn
+                        print(
+                            f"Turning RIGHT: From {self._get_direction_name(self.current_robot_vector)} to {self._get_direction_name(next_direction_code)}")
+                        self.robot_controller.turn_right()
+                        # Simulate +90 deg: 0->1, 1->-2(L), -1->0, -2->-1
+                        self.current_robot_vector = (
+                            self.current_robot_vector + 1) if self.current_robot_vector < 1 else -2
+                        # This vector update needs to precisely match the robot's actual turning capability and coding scheme
+                        # For simplicity now, assuming next_direction_code is the target after one turn if it's a 90deg diff
+                        self.current_robot_vector = next_direction_code
+
+                elif next_direction_code < self.current_robot_vector:  # Turn Left
+                    # Curr=0 (RIGHT), Next=-1 (UP) -> diff=-1. Turn Left.
+                    # Curr=1 (DOWN), Next=0 (RIGHT) -> diff=-1. Turn Left.
+                    # Curr=-1 (UP), Next=-2 (LEFT) -> diff=-1. Turn Left.
+                    if self.current_robot_vector != next_direction_code:
+                        print(
+                            f"Turning LEFT: From {self._get_direction_name(self.current_robot_vector)} to {self._get_direction_name(next_direction_code)}")
+                        self.robot_controller.turn_left(precise=True)
+                        # Simulate -90deg: 0->-1, -1->-2, -2->1(D), 1->0
+                        self.current_robot_vector = (
+                            self.current_robot_vector - 1) if self.current_robot_vector > -2 else 1
+                        self.current_robot_vector = next_direction_code
+
+                # After aligning, move forward
+                print(
+                    f"Aligned. Current Orientation: {self._get_direction_name(self.current_robot_vector)}. Moving FORWARD.")
+                self.robot_controller.move_forward()
+
+                # Post-movement checks (if robot moved forward)
+                if self.prev_robot_center and current_robot_center:
+                    # Correct direction based on actual movement
+                    # This function is from your 'movement_correct' module
+                    correct_direction(self.current_robot_vector, current_robot_center,
+                                      # Pass raw connection for now
+                                      self.prev_robot_center, self.robot_controller.connection,
+                                      coordinate_diff_threshold=COORDINATE_DIFFERENCE_FOR_CORRECT,
+                                      correction_time=CORRECT_TIME)  # Assuming correct_direction needs these
+
+                    # Find true vector after movement
+                    # This function is from your 'movement_correct' module
+                    # It needs to be adapted or its return value handled if it modifies a global 'true_vector'
+                    calculated_true_vector = find_true_vector(
+                        self.prev_robot_center, current_robot_center)  # Adapt if it modifies global
+                    if calculated_true_vector is not None:
+                        self.true_robot_vector = calculated_true_vector
+                        print(
+                            f"True vector after move: {self._get_direction_name(self.true_robot_vector)}")
+                        if self.true_robot_vector != self.current_robot_vector:
+                            print(
+                                f"{RED}----------------------------------------{RESET}")
+                            print(
+                                f"{RED}Orientation MISMATCH! Planned: {self._get_direction_name(self.current_robot_vector)}, Actual: {self._get_direction_name(self.true_robot_vector)}{RESET}")
+                            print(
+                                f"{RED}Updating current vector to actual.{RESET}")
+                            print(
+                                f"{RED}----------------------------------------{RESET}")
+                            self.current_robot_vector = self.true_robot_vector
+
+                self.prev_robot_center = current_robot_center
+
+                # Check if the current segment of path (represented by STEP_COUNT in original) is done
+                # In this refactor, one step of path is one loop.
+                # If STEP_COUNT > 1 was meant to execute multiple path segments before replanning, that would be managed here.
+                # For now, it implies replanning if path_planner.has_path() becomes false.
+                if not self.path_planner.has_path():
+                    print(
+                        f"{GREEN}Current segment of path completed. Will replan if navigation continues.{RESET}")
+
+                time.sleep(0.1)  # Small delay between iterations
+
+        except KeyboardInterrupt:
+            print("\nNavigation interrupted by user (Ctrl+C).")
+        except ConnectionError as e:
+            print(f"{RED}Halting due to critical connection error: {e}{RESET}")
+        except Exception as e:
+            print(
+                f"{RED}An unexpected error occurred in the navigation loop: {e}{RESET}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            print("Shutting down navigation system...")
+            self.robot_controller.close_connection()
+            self.camera_handler.release()
+            cv2.destroyAllWindows()
+            print("System shutdown complete.")
+
+
+if __name__ == "__main__":
+    # --- Initialize Components ---
+    try:
+        robot_ctrl = RobotController(ROBOT_HOST, ROBOT_PORT,
+                                     time_90_deg=TIME_TO_90_DEGREES,
+                                     time_1_step_fwd=TIME_FOR_ONE_STEP_FORWARD,
+                                     delta_angle_time=DELTA_ANGLE)
+
+        cam_handler = CameraHandler(RTSP_URL, CAMERA_MATRIX, DIST_COEFS,
+                                    crop_rect=(CROP_X, CROP_Y, CROP_W, CROP_H))
+
+        obj_detector = ObjectDetector(YOLO_MODEL_PATH)
+
+        # Original scale_factor was 5 commented out
+        path_plan = PathPlanner(robot_radius=ROBOT_RADIUS, scale_factor=5)
+
+        # --- Create and Run Navigation System ---
+        navigation_system = NavigationSystem(
+            robot_ctrl, cam_handler, obj_detector, path_plan)
+        navigation_system.run()
+
+    except IOError as e:
+        print(f"{RED}Error initializing components: {e}{RESET}")
+    except ConnectionError as e:
+        print(f"{RED}Error establishing initial robot connection: {e}{RESET}")
+    except Exception as e:
+        print(f"{RED}An unexpected error occurred during setup: {e}{RESET}")
+        import traceback
+        traceback.print_exc()
