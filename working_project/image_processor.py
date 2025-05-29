@@ -21,7 +21,8 @@ import matplotlib.pyplot as plt
 import asyncio
 
 # Параметры калибровки камеры (встроены в код)
-camera_matrix = np.array([[1000, 0, 320], [0, 1000, 240], [0, 0, 1]], dtype=np.float32)
+camera_matrix = np.array(
+    [[1000, 0, 320], [0, 1000, 240], [0, 0, 1]], dtype=np.float32)
 dist_coeffs = np.zeros((4, 1))  # Без дисторсии
 
 # Глобальные переменные для хранения координат точек
@@ -47,6 +48,7 @@ def mouse_callback(event, x, y, flags, param):
             clicked_point_goal = (x_norm, y_norm)
             print(f"Конечная точка установлена: ({x_norm:.2f}, {y_norm:.2f})")
 
+
 def get_vector_sing(current_point, prev_point):
     # if prev_point[0] * current_point[1] - current_point[0] * prev_point[1] < 0:
     #     return 1
@@ -58,28 +60,32 @@ def get_vector_sing(current_point, prev_point):
     return 1
 
 
+kernel_scale = (3, 3)
+# kernel_scale_1
+
 # Основная функция для обработки изображения
-async def process_image(frame, robot_cords, robot_radius=20, scale_factor=5, safety_margin=1):
+
+
+async def process_image(frame, robot_cords, robot_radius=20, scale_factor=5, safety_margin=10):
     global clicked_point_start, clicked_point_goal
-    frame = cv2.medianBlur(frame,5)
+    frame = cv2.medianBlur(frame, 5)
     print(f"Координаты робота: {robot_cords}")
-    x1,y1,x2,y2 = robot_cords
+    x1, y1, x2, y2 = robot_cords
     robot_center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
-    mask = hide_robot(frame, x1,y1,x2,y2, gain=5)
+    mask = hide_robot(frame, x1, y1, x2, y2, gain=5)
 
-
-    
     # Применение дилатации (расширение белых областей)
 
-    kernel = np.ones((3, 3), np.uint8)  # Ядро 5x5 для дилатации
-    dilated_mask = cv2.dilate(mask, kernel, iterations=20)  # 1 итерация
+    kernel = np.ones(kernel_scale, np.uint8)  # Ядро 5x5 для дилатации
+    dilated_mask = cv2.dilate(mask, kernel, iterations=12)  # 1 итерация
     # Если робот не обнаружен, предлагаем установить начальную точку вручную
     # 4. Добавляем безопасную зону вокруг препятствий
-    safety_kernel = np.ones((safety_margin*2, safety_margin*2), np.uint8)
+    safety_kernel = np.ones(
+        (int(safety_margin*2), int(safety_margin*2)), np.uint8)
     safe_obstacles = cv2.dilate(dilated_mask, safety_kernel, iterations=1)
-    contours = get_contours(safe_obstacles, x1,y1,x2,y2, gain=5)
+    contours = get_contours(safe_obstacles, x1, y1, x2, y2, gain=5)
     # 5. Отображаем для отладки
-    #cv2.imshow("Dilated Obstacles", dilated_mask)
+    # cv2.imshow("Dilated Obstacles", dilated_mask)
     cv2.imshow("Safe Obstacles", safe_obstacles)
     cv2.waitKey(1)  # Добавляем небольшую задержку для обновления окна
     # cv2.imshow("MASK", mask)
@@ -88,7 +94,7 @@ async def process_image(frame, robot_cords, robot_radius=20, scale_factor=5, saf
             "Робот не обнаружен. Установите начальную"
             "точку вручную, кликнув на изображении."
         )
-        
+
         cv2.setMouseCallback("Processed Image", mouse_callback, frame)
 
         # Ждем, пока пользователь установит начальную точку
@@ -133,15 +139,17 @@ async def process_image(frame, robot_cords, robot_radius=20, scale_factor=5, saf
     cv2.waitKey(1)
 
     # Определяем начальную и конечную точки (в уменьшенном масштабе)
-    start_scaled = (robot_center[0] // scale_factor, robot_center[1] // scale_factor)
-    goal_scaled = (goal_center[0] // scale_factor, goal_center[1] // scale_factor)
+    start_scaled = (robot_center[0] // scale_factor,
+                    robot_center[1] // scale_factor)
+    goal_scaled = (goal_center[0] // scale_factor,
+                   goal_center[1] // scale_factor)
 
     print(f"Робот установлен вручную: {robot_center}")
     print(f"Конечная точка установлена: {goal_center}")
-    
+
     # Строим путь
     path = await find_path(start_scaled, goal_scaled, obstacle_map)
-    
+
     # Проверяем, найден ли путь
     if path is None:
         print(
@@ -184,7 +192,8 @@ async def process_image(frame, robot_cords, robot_radius=20, scale_factor=5, saf
 
             sign = get_vector_sing(current_point, prev_point)
             angle = np.arccos(
-                np.dot(vector, prev_vector) / (np.linalg.norm(vector) * np.linalg.norm(prev_vector))          
+                np.dot(vector, prev_vector) /
+                (np.linalg.norm(vector) * np.linalg.norm(prev_vector))
             ) * sign
             if angle != prev_angle:
                 processed_angle = angle
@@ -220,26 +229,25 @@ async def process_image(frame, robot_cords, robot_radius=20, scale_factor=5, saf
     return angles, processed_angles
 
 # Основная функция для обработки изображения
-async def secound_process_image(frame, robot_cords, robot_radius=20, scale_factor=5,safety_margin=1):
-    frame = cv2.medianBlur(frame,5)
+
+
+async def secound_process_image(frame, robot_cords, robot_radius=20, scale_factor=5, safety_margin=1):
+    frame = cv2.medianBlur(frame, 5)
     print(f"Координаты робота: {robot_cords}")
-    x1,y1,x2,y2 = robot_cords
+    x1, y1, x2, y2 = robot_cords
     prev_robot_center = None
     robot_center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
-    mask = hide_robot(frame, x1,y1,x2,y2, gain=5)
+    mask = hide_robot(frame, x1, y1, x2, y2, gain=5)
 
-
-    
     # Применение дилатации (расширение белых областей)
 
-    kernel = np.ones((15, 15), np.uint8)  # Ядро 5x5 для дилатации
+    kernel = np.ones(kernel_scale, np.uint8)  # Ядро 5x5 для дилатации
     dilated_mask = cv2.dilate(mask, kernel, iterations=3)  # 1 итерация
     # Если робот не обнаружен, предлагаем установить начальную точку вручную
     # 4. Добавляем безопасную зону вокруг препятствий
     safety_kernel = np.ones((safety_margin*2, safety_margin*2), np.uint8)
     safe_obstacles = cv2.dilate(dilated_mask, safety_kernel, iterations=1)
-    contours = get_contours(safe_obstacles, x1,y1,x2,y2, gain=5)
-
+    contours = get_contours(safe_obstacles, x1, y1, x2, y2, gain=5)
 
     # Создаем карту препятствий
     obstacle_map, scale_factor = create_obstacle_map(
@@ -253,17 +261,17 @@ async def secound_process_image(frame, robot_cords, robot_radius=20, scale_facto
     )
 
     # Определяем начальную и конечную точки (в уменьшенном масштабе)
-    start_scaled = (robot_center[0] // scale_factor, robot_center[1] // scale_factor)
-    goal_scaled = (goal_center[0] // scale_factor, goal_center[1] // scale_factor)
+    start_scaled = (robot_center[0] // scale_factor,
+                    robot_center[1] // scale_factor)
+    goal_scaled = (goal_center[0] // scale_factor,
+                   goal_center[1] // scale_factor)
 
+    # print(f"Робот установлен вручную: {robot_center}")
+    # print(f"Конечная точка установлена: {goal_center}")
 
-    #print(f"Робот установлен вручную: {robot_center}")
-    #print(f"Конечная точка установлена: {goal_center}")
-    
     # Строим путь
 
     path = await find_path(start_scaled, goal_scaled, obstacle_map)
-
 
     # Проверяем, найден ли путь
     if path is None:
@@ -271,10 +279,10 @@ async def secound_process_image(frame, robot_cords, robot_radius=20, scale_facto
             "Ошибка: Путь не найден. Возможно, начальная"
             " или конечная точка находятся внутри препятствия."
         )
-        #cv2.imshow("Processed Image", frame)
-        #cv2.waitKey(0)
-        #cv2.destroyAllWindows()
-        #cv2.imshow("Error", safe_obstacles)
+        # cv2.imshow("Processed Image", frame)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+        # cv2.imshow("Error", safe_obstacles)
         raise PathError()
 
     # Отрисовка пути (в увеличенном масштабе)
@@ -290,21 +298,18 @@ async def secound_process_image(frame, robot_cords, robot_radius=20, scale_facto
             x_large = x * scale_factor
             y_large = y * scale_factor
 
-
             # --- ПОКАЗАТЬ ПУТЬ ---
-            #cv2.circle(frame, (x_large, y_large), 5, (0, 0, 255), -1)
+            # cv2.circle(frame, (x_large, y_large), 5, (0, 0, 255), -1)
             # ---------------------
         # --- Отображаем центр робота ---
-        #cv2.circle(frame, robot_center, 5, (0, 255, 0), -1)
+        # cv2.circle(frame, robot_center, 5, (0, 255, 0), -1)
         # --------------------------------
         # if prev_robot_center:
         #     cv2.circle(frame, prev_robot_center, 5, (0, 255, 0), -1)
         # prev_robot_center = robot_center
 
-
     plt.plot(cords_x, cords_y, ".k")
-    #plt.show()
-
+    # plt.show()
 
     if path:
 
@@ -320,7 +325,8 @@ async def secound_process_image(frame, robot_cords, robot_radius=20, scale_facto
 
             sign = get_vector_sing(current_point, prev_point)
             angle = np.arccos(
-                np.dot(vector, prev_vector) / (np.linalg.norm(vector) * np.linalg.norm(prev_vector))
+                np.dot(vector, prev_vector) /
+                (np.linalg.norm(vector) * np.linalg.norm(prev_vector))
             ) * sign
             if angle != prev_angle:
                 processed_angle = angle
@@ -347,14 +353,12 @@ async def secound_process_image(frame, robot_cords, robot_radius=20, scale_facto
             counter += 1
         # print(angles)
 
-
-    #region -------------Отображение результата-------------
+    # region -------------Отображение результата-------------
 
     # cv2.imshow("Processed Image", frame)
     # cv2.waitKey(0)
 
-    #endregion ----------------------------------------------
-
+    # endregion ----------------------------------------------
 
     # cv2.destroyAllWindows()
 

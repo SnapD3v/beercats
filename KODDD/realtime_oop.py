@@ -318,9 +318,6 @@ class Navigator:
             steps_taken = 0
             while steps_taken < self.step_count and self.angles:
                 self.angles = self.angles[1:]
-                # if len(self.angles) > 1 and self.angles[1] != 0:
-                #     self.angles = self.angles[1:]
-                #     print("PREDICT TURN!")
                 next_direction = self.angles.pop(0)
                 print(
                     f"Robot повёрнут: {self.robot_controller.direction_name(self.vector)}")
@@ -356,9 +353,6 @@ class Navigator:
 
             if not self.angles:
                 self.angles = None
-
-        self.robot_controller.close()
-        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

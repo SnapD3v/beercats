@@ -5,6 +5,8 @@ import time
 import socket
 import numpy as np
 from art import *
+from config import *
+
 
 import image_processor
 from movement_correct import correct_direction, find_true_vector
@@ -12,25 +14,6 @@ from movement_correct import correct_direction, find_true_vector
 from path_error import PathError
 
 import asyncio
-
-# Количество шагов
-STEP_COUNT = 1
-ROBOT_RADIUS = 10
-CORRECT_TIME = 160
-COORDINATE_DIFFERENCE_FOR_CORRECT = 2
-# SCALE_FACTOR = 10
-
-DELTA_ANGLE = 0
-
-
-# Скорость гусениц
-left_speed = 0x32
-right_speed = 0x32
-
-# Повернуть на угол
-time_to_90 = 760
-time_to_180 = 980
-time_to_1step_forawrd = 450
 
 RED = "\033[31m"
 RESET = "\033[0m"
@@ -55,12 +38,6 @@ height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 print(f"Параметры камеры: FPS={30}, Разрешение={width}x{height}")
 # endregion
 
-# Обрезка
-crop_x = 588
-crop_y = 690
-crop_w = 1315
-crop_h = 230
-
 # Ширина, высота кадра
 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -81,18 +58,6 @@ print(model.names)
 # region movement
 host = "192.168.1.1"
 port = 2001
-
-
-# Команды
-go_forward = b"\xff\x00\x01\x00\xff"
-go_back = b"\xff\x00\x02\x00\xff"
-turn_right = b"\xff\x00\x04\x00\xff"
-turn_left = b"\xff\x00\x03\x00\xff"
-
-stop_command = b"\xff\x00\x00\x00\xff"
-
-vector = 0
-true_vector = None
 
 
 def vector_dir(vector):
@@ -206,7 +171,7 @@ while True:
                     f"Координаты центра робота: x={robot_center_x}, y={robot_center_y}")
 
     if x1:
-        print(f"коорды робота: {x1}, {y1}, {x2}, {y2}")
+        print(f"координаты робота: {x1}, {y1}, {x2}, {y2}")
 
     annotated_frame = results[-1].plot()
 
@@ -219,6 +184,7 @@ while True:
                     robot_radius=ROBOT_RADIUS,
                     scale_factor=5,  # SCALE_FACTOR,
                     robot_cords=(int(x1), int(y1), int(x2), int(y2)),
+                    safety_margin=0.5
                 ))
             except PathError:
                 continue
@@ -243,7 +209,7 @@ while True:
                 angles, processed_angles = asyncio.run(image_processor.secound_process_image(
                     resized_frame,
                     robot_radius=ROBOT_RADIUS,
-                    scale_factor=5,  # SCALE_FACTOR,
+                    scale_factor=5,
                     robot_cords=(int(x1), int(y1), int(x2), int(y2)),
                 ))
             except PathError:
